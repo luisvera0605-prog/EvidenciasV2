@@ -203,19 +203,15 @@ async function scanFolios(
   return results
 }
 
-async function getFreshDownloadUrl(token: string, driveId: string, fileId: string): Promise<string> {
-  const data = await graphGet(
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}?$select=id,@microsoft.graph.downloadUrl`,
-    token
-  )
-  return data['@microsoft.graph.downloadUrl'] ?? ''
+// Use Vercel edge proxy to avoid SharePoint CORS restrictions
+function proxyUrl(token: string, driveId: string, fileId: string): string {
+  const params = new URLSearchParams({ driveId, fileId, token })
+  return `/api/file?${params}`
 }
 
-async function getFileBase64(token: string, driveId: string, fileId: string, downloadUrl?: string | null): Promise<string> {
-  // Use pre-signed downloadUrl (no CORS). If null, fetch a fresh one.
-  let url = downloadUrl
-  if (!url) url = await getFreshDownloadUrl(token, driveId, fileId)
-  const blob = await fetch(url).then(r => { if (!r.ok) throw new Error(`Fetch ${r.status}`); return r.blob(); })
+async function getFileBase64(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<string> {
+  const blob = await fetch(proxyUrl(token, driveId, fileId))
+    .then(r => { if (!r.ok) throw new Error(`Proxy ${r.status}`); return r.blob(); })
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onloadend = () => {
@@ -227,10 +223,9 @@ async function getFileBase64(token: string, driveId: string, fileId: string, dow
   })
 }
 
-async function getFileBlob(token: string, driveId: string, fileId: string, downloadUrl?: string | null): Promise<Blob> {
-  let url = downloadUrl
-  if (!url) url = await getFreshDownloadUrl(token, driveId, fileId)
-  return fetch(url).then(r => { if (!r.ok) throw new Error(`Fetch ${r.status}`); return r.blob(); })
+async function getFileBlob(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<Blob> {
+  return fetch(proxyUrl(token, driveId, fileId))
+    .then(r => { if (!r.ok) throw new Error(`Proxy ${r.status}`); return r.blob(); })
 }
 
 // ============================================================
