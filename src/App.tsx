@@ -11,6 +11,7 @@ interface EvidenciaFile {
   modified: string
   mimeType: string
   driveId: string
+  downloadUrl: string | null
 }
 
 interface ScanProgress {
@@ -190,6 +191,7 @@ async function scanFolios(
             modified: item.lastModifiedDateTime ?? '',
             mimeType: item.file?.mimeType ?? '',
             driveId,
+            downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null,
           })
         }
       }
@@ -200,11 +202,11 @@ async function scanFolios(
   return results
 }
 
-async function getFileBase64(token: string, driveId: string, fileId: string): Promise<string> {
-  const blob = await graphBlob(
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`,
-    token
-  )
+async function getFileBase64(token: string, driveId: string, fileId: string, downloadUrl?: string | null): Promise<string> {
+  // Use pre-signed downloadUrl if available (no CORS issues), otherwise use Graph API
+  const blob = downloadUrl
+    ? await fetch(downloadUrl).then(r => r.blob())
+    : await graphBlob(`https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`, token)
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onloadend = () => {
@@ -216,11 +218,9 @@ async function getFileBase64(token: string, driveId: string, fileId: string): Pr
   })
 }
 
-async function getFileBlob(token: string, driveId: string, fileId: string): Promise<Blob> {
-  return graphBlob(
-    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`,
-    token
-  )
+async function getFileBlob(token: string, driveId: string, fileId: string, downloadUrl?: string | null): Promise<Blob> {
+  if (downloadUrl) return fetch(downloadUrl).then(r => r.blob())
+  return graphBlob(`https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`, token)
 }
 
 // ============================================================
@@ -414,7 +414,7 @@ export default function App() {
     if (!token) return
     setAnalyzingIds(prev => new Set(prev).add(file.id))
     try {
-      const base64 = await getFileBase64(token, file.driveId, file.id)
+      const base64 = await getFileBase64(token, file.driveId, file.id, file.downloadUrl)
       const mime = getMimeType(file)
       const result = await analyzeWithClaude(base64, mime, file.folio)
       setAnalyses(prev => ({ ...prev, [file.id]: result }))
@@ -449,7 +449,7 @@ export default function App() {
     setPreview(file)
     setPreviewUrl(null)
     try {
-      const blob = await getFileBlob(token, file.driveId, file.id)
+      const blob = await getFileBlob(token, file.driveId, file.id, file.downloadUrl)
       setPreviewUrl(URL.createObjectURL(blob))
     } catch {
       // preview failed silently
