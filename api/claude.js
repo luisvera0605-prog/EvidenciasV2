@@ -1,4 +1,7 @@
-export const config = { runtime: 'edge' }
+export const config = {
+  runtime: 'edge',
+  maxDuration: 60,
+}
 
 export default async function handler(req) {
   if (req.method === 'OPTIONS') {
@@ -39,7 +42,7 @@ export default async function handler(req) {
       },
     })
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), {
+    return new Response(JSON.stringify({ error: String(e) }), {
       status: 500,
       headers: {
         'Content-Type': 'application/json',
