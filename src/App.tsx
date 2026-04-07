@@ -12,6 +12,7 @@ interface EvidenciaFile {
   mimeType: string
   driveId: string
   downloadUrl: string | null
+  webUrl: string | null
 }
 
 interface ScanProgress {
@@ -150,7 +151,7 @@ async function getEvidenciasDriveId(token: string, siteId: string): Promise<stri
 }
 
 async function listAllChildren(token: string, driveId: string, path: string): Promise<any[]> {
-  const select = '$select=id,name,size,file,folder,lastModifiedDateTime,@microsoft.graph.downloadUrl'
+  const select = '$select=id,name,size,file,folder,lastModifiedDateTime,webUrl,@microsoft.graph.downloadUrl'
   const firstUrl = path
     ? `https://graph.microsoft.com/v1.0/drives/${driveId}/root:/${encodeURIComponent(path)}:/children?$top=999&${select}`
     : `https://graph.microsoft.com/v1.0/drives/${driveId}/root/children?$top=999&${select}`
@@ -193,6 +194,7 @@ async function scanFolios(
             mimeType: item.file?.mimeType ?? '',
             driveId,
             downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null,
+            webUrl: item.webUrl ?? null,
           })
         }
       }
@@ -305,11 +307,11 @@ const SEM: Record<string, { bg: string; color: string; label: string }> = {
 }
 
 function exportCSV(files: EvidenciaFile[], analyses: Record<string, AnalysisResult>): void {
-  const headers = ['Folio','Archivo','Semaforo','Tipo','Fecha','Monto','Referencia','Cliente','Banco','Folio_Presente','Observaciones','Tamaño','Modificado']
+  const headers = ['Folio','Archivo','URL_SharePoint','Semaforo','Tipo','Fecha','Monto','Referencia','Cliente','Banco','Folio_Presente','Observaciones','Tamaño','Modificado']
   const rows = files.map(f => {
     const a = analyses[f.id]
     return [
-      f.folio, f.name, a?.semaforo ?? 'sin_analizar', a?.tipo_documento ?? '',
+      f.folio, f.name, f.webUrl ?? '', a?.semaforo ?? 'sin_analizar', a?.tipo_documento ?? '',
       a?.fecha ?? '', a?.monto ?? '', a?.referencia ?? '', a?.cliente_documento ?? '',
       a?.banco_emisor ?? '', String(a?.folio_presente ?? ''), a?.observaciones ?? '',
       fmtKB(f.size), new Date(f.modified).toLocaleDateString('es-MX'),
