@@ -172,13 +172,14 @@ async function scanFolios(token: string, driveId: string, basePath: string, onPr
 }
 
 // ============================================================
-// GEMINI API (v1 Estable)
+// GEMINI API (v1 Estable - Fixed URL & Model)
 // ============================================================
 async function analyzeWithGemini(base64: string, mimeType: string, folio: string): Promise<AnalysisResult> {
   const apiKey = CONFIG.geminiApiKey;
-  if (!apiKey || apiKey.length < 10) throw new Error("API Key de Gemini no configurada en CONFIG");
+  if (!apiKey || apiKey.length < 10) throw new Error("API Key no configurada");
 
-  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
+  
   const prompt = `Eres auditor financiero. Analiza esta evidencia del folio "${folio}". Extrae y responde SOLO con JSON válido:
   {
     "legible": true,
@@ -207,16 +208,17 @@ async function analyzeWithGemini(base64: string, mimeType: string, folio: string
   }
 
   const data = await res.json();
+  if (!data.candidates || data.candidates.length === 0) throw new Error("Sin respuesta de Gemini");
+  
   let text = data.candidates[0].content.parts[0].text;
   text = text.replace(/```json|```/g, '').trim();
   return JSON.parse(text);
 }
 
 // ============================================================
-// HELPERS & STYLES
+// HELPERS & UI COMPONENTS
 // ============================================================
 const fmtMXN = (n: number | null) => n != null ? new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n) : '$0.00';
-const fmtKB = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`;
 const SEM: Record<string, any> = {
   verde:    { bg: '#d1fae5', color: '#064e3b', label: '✓ OK' },
   amarillo: { bg: '#fef3c7', color: '#78350f', label: '⚠ Revisar' },
@@ -234,7 +236,6 @@ function AnalysisCard({ r }: { r: AnalysisResult }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, color: '#475569' }}>
         {r.monto && <div>Monto: <strong>{fmtMXN(r.monto)}</strong></div>}
         {r.fecha && <div>Fecha: <strong>{r.fecha}</strong></div>}
-        {r.referencia && <div style={{ gridColumn: 'span 2' }}>Ref: <strong>{r.referencia}</strong></div>}
       </div>
       {r.observaciones && <div style={{ marginTop: 6, fontStyle: 'italic', color: '#64748b' }}>{r.observaciones}</div>}
     </div>
@@ -242,7 +243,7 @@ function AnalysisCard({ r }: { r: AnalysisResult }) {
 }
 
 // ============================================================
-// MAIN COMPONENT
+// MAIN APP
 // ============================================================
 export default function App() {
   const [token, setToken] = useState<string | null>(null);
@@ -326,7 +327,6 @@ export default function App() {
 
   return (
     <div style={{ background: '#f1f5f9', minHeight: '100vh', fontFamily: 'sans-serif' }}>
-      {/* HEADER */}
       <div style={{ background: '#0f172a', padding: '15px 25px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#fff' }}>
         <div><strong style={{ fontSize: 18 }}>EvidenciasIQ</strong> <span style={{ opacity: 0.6, fontSize: 12 }}>| {user?.displayName}</span></div>
         <div style={{ display: 'flex', gap: 10 }}>
@@ -336,7 +336,6 @@ export default function App() {
       </div>
 
       <div style={{ padding: 25, maxWidth: 1300, margin: '0 auto' }}>
-        {/* SCAN BAR */}
         <div style={{ background: '#fff', padding: 20, borderRadius: 15, border: '1px solid #e2e8f0', marginBottom: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
             <div style={{ flex: 1 }}>
@@ -356,24 +355,21 @@ export default function App() {
           )}
         </div>
 
-        {/* KPIs CARDS */}
         {files.length > 0 && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 15, marginBottom: 20 }}>
             {[ ['Total', stats.total, '#1e40af'], ['Analizados', stats.analizados, '#0f766e'], ['✓ OK', stats.verde, '#064e3b'], ['⚠ Revisar', stats.amarillo, '#92400e'], ['✗ Alertas', stats.rojo, '#991b1b'], ['Monto MXN', fmtMXN(stats.monto), '#4c1d95'] ]
               .map(([lbl, val, col]) => (
                 <div key={lbl as string} style={{ background: '#fff', padding: 15, borderRadius: 15, border: '1px solid #e2e8f0', textAlign: 'center' }}>
-                  <div style={{ fontSize: 10, fontWeight: 800, color: '#94a3b8', textTransform: 'uppercase' }}>{lbl}</div>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: '#94a3b8' }}>{lbl}</div>
                   <div style={{ fontSize: 18, fontWeight: 900, color: col as string, marginTop: 5 }}>{val}</div>
                 </div>
               ))}
           </div>
         )}
 
-        {/* LIST & PREVIEW */}
         <div style={{ display: 'grid', gridTemplateColumns: preview ? '1fr 400px' : '1fr', gap: 20 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <input placeholder="🔍 Buscar por folio o nombre..." value={search} onChange={e => setSearch(e.target.value)} style={{ padding: '12px', borderRadius: 10, border: '1px solid #e2e8f0', marginBottom: 10 }} />
-            
             {files.filter(f => f.folio.toLowerCase().includes(search.toLowerCase()) || f.name.toLowerCase().includes(search.toLowerCase())).map(f => {
               const a = analyses[f.id]; const isAn = analyzingIds.has(f.id);
               return (
@@ -389,7 +385,6 @@ export default function App() {
               );
             })}
           </div>
-
           {preview && (
             <div style={{ background: '#fff', borderRadius: 15, border: '1px solid #e2e8f0', position: 'sticky', top: 20, height: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               <div style={{ padding: 15, borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
