@@ -54,7 +54,6 @@ const CONFIG = {
   sitePath: '/sites/PlaneacionFinanciera',
   redirectUri: window.location.origin,
   scopes: ['Files.Read', 'Files.Read.All', 'offline_access', 'User.Read'],
-  // Si la variable de Vercel no carga, puedes pegarla aquí temporalmente entre comillas
   geminiApiKey: import.meta.env.VITE_GEMINI_API_KEY || '' 
 }
 
@@ -111,12 +110,6 @@ function getStoredToken(): string | null {
   return Date.now() < expires ? token : null
 }
 
-function clearAuth(): void {
-  sessionStorage.removeItem('ms_token')
-  sessionStorage.removeItem('pkce_verifier')
-  sessionStorage.removeItem('oauth_state')
-}
-
 // ============================================================
 // GRAPH API
 // ============================================================
@@ -127,22 +120,14 @@ async function graphGet(url: string, token: string): Promise<any> {
 }
 
 async function getSiteId(token: string): Promise<string> {
-  const data = await graphGet(
-    `https://graph.microsoft.com/v1.0/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`,
-    token
-  )
+  const data = await graphGet(`https://graph.microsoft.com/v1.0/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`, token)
   return data.id
 }
 
 async function getEvidenciasDriveId(token: string, siteId: string): Promise<string> {
-  const data = await graphGet(
-    `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`,
-    token
-  )
+  const data = await graphGet(`https://graph.microsoft.com/v1.0/sites/${siteId}/drives`, token)
   const drives: any[] = data.value ?? []
-  const ev = drives.find(
-    (d: any) => d.name === 'Evidencias' || d.webUrl?.toLowerCase().includes('/evidencias')
-  )
+  const ev = drives.find(d => d.name === 'Evidencias' || d.webUrl?.toLowerCase().includes('/evidencias'))
   return ev?.id ?? drives[0]?.id ?? ''
 }
 
@@ -161,12 +146,7 @@ async function listAllChildren(token: string, driveId: string, path: string): Pr
   return all
 }
 
-async function scanFolios(
-  token: string,
-  driveId: string,
-  basePath: string,
-  onProgress: (p: ScanProgress) => void
-): Promise<EvidenciaFile[]> {
+async function scanFolios(token: string, driveId: string, basePath: string, onProgress: (p: ScanProgress) => void): Promise<EvidenciaFile[]> {
   const folders = await listAllChildren(token, driveId, basePath)
   const folioFolders = folders.filter((f: any) => f.folder)
   onProgress({ total: folioFolders.length, current: 0 })
@@ -180,88 +160,60 @@ async function scanFolios(
       for (const item of items) {
         if (item.file && /\.(pdf|jpg|jpeg|png|webp)$/i.test(item.name)) {
           results.push({
-            id: item.id,
-            name: item.name,
-            folio: folder.name,
-            size: item.size ?? 0,
-            modified: item.lastModifiedDateTime ?? '',
-            mimeType: item.file?.mimeType ?? '',
-            driveId,
-            downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null,
-            webUrl: item.webUrl ?? null,
+            id: item.id, name: item.name, folio: folder.name, size: item.size ?? 0,
+            modified: item.lastModifiedDateTime ?? '', mimeType: item.file?.mimeType ?? '',
+            driveId, downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null, webUrl: item.webUrl ?? null,
           })
         }
       }
-    } catch { /* skip inaccessible folder */ }
+    } catch { /* skip folder */ }
   }
   return results
 }
 
-function proxyUrl(token: string, driveId: string, fileId: string): string {
-  const params = new URLSearchParams({ driveId, fileId, token })
-  return `/api/file?${params}`
-}
-
-async function getFileBase64(token: string, driveId: string, fileId: string): Promise<string> {
-  const res = await fetch(proxyUrl(token, driveId, fileId))
-  if (!res.ok) throw new Error(`Proxy ${res.status}`)
-  const blob = await res.blob()
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onloadend = () => resolve((reader.result as string).split(',')[1])
-    reader.onerror = reject
-    reader.readAsDataURL(blob)
-  })
-}
-
 // ============================================================
-// GEMINI API (Ajustado para evitar Error 413)
+// GEMINI API (v1 Estable)
 // ============================================================
-async function analyzeWithGemini(
-  base64: string,
-  mimeType: string,
-  folio: string
-): Promise<AnalysisResult> {
+async function analyzeWithGemini(base64: string, mimeType: string, folio: string): Promise<AnalysisResult> {
   const apiKey = CONFIG.geminiApiKey;
-  if (!apiKey || apiKey.length < 10) throw new Error("API Key no configurada");
+  if (!apiKey || apiKey.length < 10) throw new Error("API Key de Gemini no configurada en CONFIG");
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
-  const prompt = `Eres auditor financiero de "Flor de Tabasco". Analiza esta evidencia del folio "${folio}".
-Extrae y responde SOLO con JSON válido:
-{
-  "legible": true,
-  "tipo_documento": "transferencia|ticket_caja|factura|remision|foto_entrega|comprobante_pago|otro",
-  "fecha": "DD/MM/YYYY o null",
-  "monto": 1234.56,
-  "referencia": "numero de operacion o null",
-  "cliente_documento": "nombre del cliente o null",
-  "banco_emisor": "banco o null",
-  "folio_presente": true,
-  "observaciones": "una línea máximo",
-  "semaforo": "verde|amarillo|rojo"
-}`;
+  const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const prompt = `Eres auditor financiero. Analiza esta evidencia del folio "${folio}". Extrae y responde SOLO con JSON válido:
+  {
+    "legible": true,
+    "tipo_documento": "transferencia|ticket_caja|factura|remision|comprobante_pago",
+    "fecha": "DD/MM/YYYY",
+    "monto": 0.0,
+    "referencia": "string",
+    "cliente_documento": "string",
+    "banco_emisor": "string",
+    "folio_presente": true,
+    "observaciones": "string",
+    "semaforo": "verde|amarillo|rojo"
+  }`;
 
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
-      generationConfig: { response_mime_type: "application/json", temperature: 0.1 }
     })
   });
 
   if (!res.ok) {
     const err = await res.json();
-    throw new Error(err.error?.message || "Error en Gemini API");
+    throw new Error(err.error?.message || `Error API: ${res.status}`);
   }
 
   const data = await res.json();
-  const text = data.candidates[0].content.parts[0].text;
-  return JSON.parse(text.trim());
+  let text = data.candidates[0].content.parts[0].text;
+  text = text.replace(/```json|```/g, '').trim();
+  return JSON.parse(text);
 }
 
 // ============================================================
-// HELPERS & UI
+// HELPERS & STYLES
 // ============================================================
 const fmtMXN = (n: number | null) => n != null ? new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n) : '$0.00';
 const fmtKB = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`;
@@ -274,80 +226,88 @@ const SEM: Record<string, any> = {
 function AnalysisCard({ r }: { r: AnalysisResult }) {
   const s = SEM[r.semaforo] ?? SEM.amarillo
   return (
-    <div style={{ marginTop: 8, padding: 10, background: '#f8faff', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 12 }}>
-      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-        <span style={{ background: s.bg, color: s.color, fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20 }}>{s.label}</span>
-        <span style={{ background: '#dbeafe', color: '#1e3a8a', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20 }}>{r.tipo_documento}</span>
+    <div style={{ marginTop: 8, padding: 10, background: '#f8fafc', borderRadius: 10, border: '1px solid #e2e8f0', fontSize: 12 }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+        <span style={{ background: s.bg, color: s.color, padding: '2px 8px', borderRadius: 20, fontWeight: 700 }}>{s.label}</span>
+        <span style={{ background: '#e0e7ff', color: '#3730a3', padding: '2px 8px', borderRadius: 20, fontWeight: 700 }}>{r.tipo_documento}</span>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px', color: '#475569' }}>
-        {[['Fecha', r.fecha], ['Monto', r.monto ? fmtMXN(r.monto) : null], ['Ref', r.referencia], ['Cliente', r.cliente_documento]].map(([k, v]) => 
-          v && <div key={k}><span style={{ color: '#94a3b8' }}>{k}: </span><strong>{v}</strong></div>
-        )}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, color: '#475569' }}>
+        {r.monto && <div>Monto: <strong>{fmtMXN(r.monto)}</strong></div>}
+        {r.fecha && <div>Fecha: <strong>{r.fecha}</strong></div>}
+        {r.referencia && <div style={{ gridColumn: 'span 2' }}>Ref: <strong>{r.referencia}</strong></div>}
       </div>
-      {r.observaciones && <p style={{ margin: '6px 0 0', color: '#64748b', fontStyle: 'italic', fontSize: 11 }}>{r.observaciones}</p>}
+      {r.observaciones && <div style={{ marginTop: 6, fontStyle: 'italic', color: '#64748b' }}>{r.observaciones}</div>}
     </div>
   )
 }
 
 // ============================================================
-// MAIN APP
+// MAIN COMPONENT
 // ============================================================
 export default function App() {
-  const [token, setToken] = useState<string | null>(null)
-  const [user, setUser] = useState<User | null>(null)
-  const [driveId, setDriveId] = useState<string | null>(null)
-  const [files, setFiles] = useState<EvidenciaFile[]>([])
-  const [analyses, setAnalyses] = useState<Record<string, AnalysisResult>>({})
-  const [scanning, setScanning] = useState(false)
-  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null)
-  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
-  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set())
-  const [error, setError] = useState<string | null>(null)
-  const [basePath, setBasePath] = useState('Ventas')
-  const [search, setSearch] = useState('')
-  const [preview, setPreview] = useState<EvidenciaFile | null>(null)
-  const stopRef = useRef(false)
+  const [token, setToken] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [driveId, setDriveId] = useState<string | null>(null);
+  const [files, setFiles] = useState<EvidenciaFile[]>([]);
+  const [analyses, setAnalyses] = useState<Record<string, AnalysisResult>>({});
+  const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null);
+  const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const [basePath, setBasePath] = useState('Ventas');
+  const [search, setSearch] = useState('');
+  const [preview, setPreview] = useState<EvidenciaFile | null>(null);
+  const stopRef = useRef(false);
 
   useEffect(() => {
-    const code = new URLSearchParams(window.location.search).get('code')
+    const code = new URLSearchParams(window.location.search).get('code');
     if (code) {
-      window.history.replaceState({}, '', window.location.pathname)
-      pkceExchange(code).then(setToken).catch(e => setError(String(e)))
+      window.history.replaceState({}, '', window.location.pathname);
+      pkceExchange(code).then(setToken).catch(e => setError(String(e)));
     } else {
-      const t = getStoredToken(); if (t) setToken(t)
+      const t = getStoredToken(); if (t) setToken(t);
     }
-  }, [])
+  }, []);
 
   useEffect(() => {
-    if (!token) return
-    graphGet('https://graph.microsoft.com/v1.0/me', token).then(setUser).catch(() => {})
-    getSiteId(token).then(id => getEvidenciasDriveId(token, id)).then(setDriveId).catch(e => setError(String(e)))
-  }, [token])
+    if (!token) return;
+    graphGet('https://graph.microsoft.com/v1.0/me', token).then(setUser).catch(() => {});
+    getSiteId(token).then(id => getEvidenciasDriveId(token, id)).then(setDriveId).catch(e => setError(String(e)));
+  }, [token]);
 
   const analyzeOne = async (file: EvidenciaFile) => {
-    setAnalyzingIds(prev => new Set(prev).add(file.id))
+    setAnalyzingIds(prev => new Set(prev).add(file.id));
     try {
-      const base64 = await getFileBase64(token!, file.driveId, file.id)
-      const res = await analyzeWithGemini(base64, file.mimeType || 'image/jpeg', file.folio)
-      setAnalyses(prev => ({ ...prev, [file.id]: res }))
+      const proxyUrl = `/api/file?${new URLSearchParams({ driveId: file.driveId, fileId: file.id, token: token! })}`;
+      const resFile = await fetch(proxyUrl);
+      if (!resFile.ok) throw new Error("Error Proxy");
+      const blob = await resFile.blob();
+      const base64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(blob);
+      });
+      const result = await analyzeWithGemini(base64, file.mimeType || 'image/jpeg', file.folio);
+      setAnalyses(prev => ({ ...prev, [file.id]: result }));
     } catch (e: any) {
-      setAnalyses(prev => ({ ...prev, [file.id]: { semaforo: 'rojo', observaciones: e.message } as any }))
+      setAnalyses(prev => ({ ...prev, [file.id]: { semaforo: 'rojo', observaciones: e.message } as any }));
     }
-    setAnalyzingIds(prev => { const s = new Set(prev); s.delete(file.id); return s })
-  }
+    setAnalyzingIds(prev => { const s = new Set(prev); s.delete(file.id); return s });
+  };
 
   const analyzeAll = async () => {
-    stopRef.current = false
-    const pending = files.filter(f => !analyses[f.id])
-    setBatchProgress({ total: pending.length, current: 0 })
+    stopRef.current = false;
+    const pending = files.filter(f => !analyses[f.id]);
+    setBatchProgress({ total: pending.length, current: 0 });
     for (let i = 0; i < pending.length; i++) {
-      if (stopRef.current) break
-      await analyzeOne(pending[i])
-      setBatchProgress({ total: pending.length, current: i + 1 })
-      if (i % 5 === 4) await new Promise(r => setTimeout(r, 1000))
+      if (stopRef.current) break;
+      await analyzeOne(pending[i]);
+      setBatchProgress({ total: pending.length, current: i + 1 });
+      if (i % 5 === 4) await new Promise(r => setTimeout(r, 1000));
     }
-    setBatchProgress(null)
-  }
+    setBatchProgress(null);
+  };
 
   const stats = {
     total: files.length,
@@ -356,13 +316,13 @@ export default function App() {
     amarillo: Object.values(analyses).filter(a => a.semaforo === 'amarillo').length,
     rojo: Object.values(analyses).filter(a => a.semaforo === 'rojo').length,
     monto: Object.values(analyses).reduce((s, a) => s + (a.monto || 0), 0)
-  }
+  };
 
   if (!token) return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#0f172a' }}>
       <button onClick={pkceLogin} style={{ padding: '15px 30px', background: '#0078d4', color: '#fff', border: 'none', borderRadius: 10, fontWeight: 700, cursor: 'pointer' }}>🔐 Conectar SharePoint IQ</button>
     </div>
-  )
+  );
 
   return (
     <div style={{ background: '#f1f5f9', minHeight: '100vh', fontFamily: 'sans-serif' }}>
@@ -409,7 +369,7 @@ export default function App() {
           </div>
         )}
 
-        {/* CONTENT & SEARCH */}
+        {/* LIST & PREVIEW */}
         <div style={{ display: 'grid', gridTemplateColumns: preview ? '1fr 400px' : '1fr', gap: 20 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <input placeholder="🔍 Buscar por folio o nombre..." value={search} onChange={e => setSearch(e.target.value)} style={{ padding: '12px', borderRadius: 10, border: '1px solid #e2e8f0', marginBottom: 10 }} />
@@ -430,7 +390,6 @@ export default function App() {
             })}
           </div>
 
-          {/* PREVIEW PANEL */}
           {preview && (
             <div style={{ background: '#fff', borderRadius: 15, border: '1px solid #e2e8f0', position: 'sticky', top: 20, height: '85vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
               <div style={{ padding: 15, borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -438,7 +397,7 @@ export default function App() {
                 <button onClick={() => setPreview(null)} style={{ border: 'none', background: 'none', fontSize: 20, cursor: 'pointer' }}>✕</button>
               </div>
               <div style={{ flex: 1, background: '#f8fafc' }}>
-                <iframe src={proxyUrl(token!, preview.driveId, preview.id)} style={{ width: '100%', height: '100%', border: 'none' }} />
+                <iframe src={`/api/file?${new URLSearchParams({ driveId: preview.driveId, fileId: preview.id, token: token! })}`} style={{ width: '100%', height: '100%', border: 'none' }} />
               </div>
             </div>
           )}
