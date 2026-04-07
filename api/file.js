@@ -1,25 +1,43 @@
-export default async function handler(req, res) {
-  const { driveId, fileId, token } = req.query;
+export const config = { runtime: 'edge' }
 
-  if (!driveId || !fileId || !token) {
-    return res.status(400).json({ error: 'Missing parameters' });
+export default async function handler(req) {
+  // Only allow GET
+  if (req.method !== 'GET') {
+    return new Response('Method not allowed', { status: 405 })
   }
 
-  const url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`;
+  const url = new URL(req.url)
+  const driveId = url.searchParams.get('driveId')
+  const fileId = url.searchParams.get('fileId')
+  const token = url.searchParams.get('token')
+
+  if (!driveId || !fileId || !token) {
+    return new Response('Missing params', { status: 400 })
+  }
 
   try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    const graphUrl = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${fileId}/content`
+    const res = await fetch(graphUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      redirect: 'follow',
+    })
 
-    if (!response.ok) throw new Error(`SharePoint error: ${response.status}`);
+    if (!res.ok) {
+      return new Response(`Graph error: ${res.status}`, { status: res.status })
+    }
 
-    const contentType = response.headers.get('content-type');
-    const buffer = await response.arrayBuffer();
+    const blob = await res.arrayBuffer()
+    const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
 
-    res.setHeader('Content-Type', contentType);
-    res.status(200).send(Buffer.from(buffer));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    return new Response(blob, {
+      status: 200,
+      headers: {
+        'Content-Type': contentType,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'private, max-age=300',
+      },
+    })
+  } catch (e) {
+    return new Response(`Error: ${e.message}`, { status: 500 })
   }
 }
