@@ -45,7 +45,7 @@ interface User {
 }
 
 // ============================================================
-// CONFIG
+// CONFIG - REEMPLAZA TU API KEY AQUÍ
 // ============================================================
 const CONFIG = {
   clientId: 'b271f29f-65f7-476e-a272-63669bdfd85e',
@@ -54,6 +54,7 @@ const CONFIG = {
   sitePath: '/sites/PlaneacionFinanciera',
   redirectUri: window.location.origin,
   scopes: ['Files.Read', 'Files.Read.All', 'offline_access', 'User.Read'],
+  geminiApiKey: 'TU_GEMINI_API_KEY_AQUI' // <--- PON TU LLAVE DE GOOGLE AI STUDIO
 }
 
 // ============================================================
@@ -116,7 +117,7 @@ function clearAuth(): void {
 }
 
 // ============================================================
-// GRAPH API
+// GRAPH API & HELPERS
 // ============================================================
 async function graphGet(url: string, token: string): Promise<any> {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
@@ -125,22 +126,14 @@ async function graphGet(url: string, token: string): Promise<any> {
 }
 
 async function getSiteId(token: string): Promise<string> {
-  const data = await graphGet(
-    `https://graph.microsoft.com/v1.0/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`,
-    token
-  )
+  const data = await graphGet(`https://graph.microsoft.com/v1.0/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`, token)
   return data.id
 }
 
 async function getEvidenciasDriveId(token: string, siteId: string): Promise<string> {
-  const data = await graphGet(
-    `https://graph.microsoft.com/v1.0/sites/${siteId}/drives`,
-    token
-  )
+  const data = await graphGet(`https://graph.microsoft.com/v1.0/sites/${siteId}/drives`, token)
   const drives: any[] = data.value ?? []
-  const ev = drives.find(
-    (d: any) => d.name === 'Evidencias' || d.webUrl?.toLowerCase().includes('/evidencias')
-  )
+  const ev = drives.find((d: any) => d.name === 'Evidencias' || d.webUrl?.toLowerCase().includes('/evidencias'))
   return ev?.id ?? drives[0]?.id ?? ''
 }
 
@@ -159,14 +152,7 @@ async function listAllChildren(token: string, driveId: string, path: string): Pr
   return all
 }
 
-const MEDIA_RE = /\.(jpg|jpeg|png|gif|webp|pdf|bmp|tiff|heic)$/i
-
-async function scanFolios(
-  token: string,
-  driveId: string,
-  basePath: string,
-  onProgress: (p: ScanProgress) => void
-): Promise<EvidenciaFile[]> {
+async function scanFolios(token: string, driveId: string, basePath: string, onProgress: (p: ScanProgress) => void): Promise<EvidenciaFile[]> {
   const folders = await listAllChildren(token, driveId, basePath)
   const folioFolders = folders.filter((f: any) => f.folder)
   onProgress({ total: folioFolders.length, current: 0 })
@@ -178,21 +164,15 @@ async function scanFolios(
     try {
       const items = await listAllChildren(token, driveId, `${basePath}/${folder.name}`)
       for (const item of items) {
-        if (item.file && MEDIA_RE.test(item.name)) {
+        if (item.file && /\.(jpg|jpeg|png|gif|webp|pdf|bmp|tiff)$/i.test(item.name)) {
           results.push({
-            id: item.id,
-            name: item.name,
-            folio: folder.name,
-            size: item.size ?? 0,
-            modified: item.lastModifiedDateTime ?? '',
-            mimeType: item.file?.mimeType ?? '',
-            driveId,
-            downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null,
-            webUrl: item.webUrl ?? null,
+            id: item.id, name: item.name, folio: folder.name, size: item.size ?? 0,
+            modified: item.lastModifiedDateTime ?? '', mimeType: item.file?.mimeType ?? '',
+            driveId, downloadUrl: item['@microsoft.graph.downloadUrl'] ?? null, webUrl: item.webUrl ?? null,
           })
         }
       }
-    } catch { /* skip inaccessible folder */ }
+    } catch { /* skip folder */ }
   }
   return results
 }
@@ -204,46 +184,29 @@ function proxyUrl(token: string, driveId: string, fileId: string): string {
 
 async function getFileBase64(token: string, driveId: string, fileId: string): Promise<string> {
   const res = await fetch(proxyUrl(token, driveId, fileId))
-  if (!res.ok) throw new Error(`Proxy ${res.status}`)
+  if (!res.ok) throw new Error(`Error descargando archivo (Proxy ${res.status})`)
   const blob = await res.blob()
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onloadend = () => {
-      const result = reader.result as string
-      resolve(result.split(',')[1])
-    }
+    reader.onloadend = () => resolve((reader.result as string).split(',')[1])
     reader.onerror = reject
     reader.readAsDataURL(blob)
   })
 }
 
-async function getFileBlob(token: string, driveId: string, fileId: string): Promise<Blob> {
-  const res = await fetch(proxyUrl(token, driveId, fileId))
-  if (!res.ok) throw new Error(`Proxy ${res.status}`)
-  return res.blob()
-}
-
 // ============================================================
-// GEMINI VISION (Migración desde Claude)
+// GEMINI DIRECT API (Solución al Error 413/500)
 // ============================================================
-function getMimeType(file: EvidenciaFile): string {
-  if (file.mimeType) return file.mimeType
-  const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-  const map: Record<string, string> = {
-    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
-    gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf', bmp: 'image/bmp',
+async function analyzeWithGemini(base64: string, mimeType: string, folio: string): Promise<AnalysisResult> {
+  if (!CONFIG.geminiApiKey || CONFIG.geminiApiKey.includes('AQUI')) {
+    throw new Error("API Key de Gemini no configurada en CONFIG");
   }
-  return map[ext] ?? 'image/jpeg'
-}
 
-async function analyzeWithGemini(
-  base64: string,
-  mimeType: string,
-  folio: string
-): Promise<AnalysisResult> {
-  const isPdf = mimeType.includes('pdf')
-  const prompt = `Eres auditor financiero de "Flor de Tabasco". Analiza esta evidencia de pago del folio "${folio}".
-Extrae y responde SOLO con JSON válido sin texto adicional:
+  const isPdf = mimeType.includes('pdf');
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${CONFIG.geminiApiKey}`;
+
+  const prompt = `Eres auditor financiero de "Flor de Tabasco". Analiza esta evidencia del folio "${folio}".
+Extrae y responde SOLO con JSON válido:
 {
   "legible": true,
   "tipo_documento": "transferencia|ticket_caja|factura|remision|foto_entrega|comprobante_pago|otro",
@@ -255,87 +218,62 @@ Extrae y responde SOLO con JSON válido sin texto adicional:
   "folio_presente": true,
   "observaciones": "una línea máximo",
   "semaforo": "verde|amarillo|rojo"
-}
-semaforo: verde=todo correcto, amarillo=datos parciales, rojo=ilegible o inconsistente`
+}`;
 
-  const contentPart = { 
-    type: isPdf ? 'document' : 'image', 
-    source: { type: 'base64', media_type: mimeType, data: base64 } 
-  }
+  const body = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: mimeType, data: base64 } }
+      ]
+    }],
+    generationConfig: { response_mime_type: "application/json", temperature: 0.1 }
+  };
 
-  const res = await fetch('/api/gemini', { // Debe existir api/gemini.js en tu carpeta api/
+  const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      messages: [{ role: 'user', content: [contentPart, { type: 'text', text: prompt }] }],
-    }),
-  })
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errData = await res.json();
+    throw new Error(errData.error?.message || `Error API Gemini: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const text = data.candidates[0].content.parts[0].text;
   
-  const data = await res.json()
-  const text: string = data.content?.[0]?.text ?? '{}'
   try {
-    return JSON.parse(text.replace(/```json|```/g, '').trim()) as AnalysisResult
+    return JSON.parse(text.trim());
   } catch {
-    return {
-      legible: false, tipo_documento: 'error_parse', fecha: null, monto: null,
-      referencia: null, cliente_documento: null, banco_emisor: null,
-      folio_presente: null, observaciones: 'Error al procesar JSON de IA', semaforo: 'rojo',
-    }
+    throw new Error("Gemini no devolvió un JSON válido");
   }
 }
 
 // ============================================================
-// HELPERS
+// UI COMPONENTS & HELPERS
 // ============================================================
-const fmtMXN = (n: number | null) =>
-  n != null ? new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n) : '—'
-
-const fmtKB = (b: number) =>
-  b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`
-
+const fmtMXN = (n: number | null) => n != null ? new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(n) : '—';
+const fmtKB = (b: number) => b > 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(1)} MB` : `${(b / 1024).toFixed(0)} KB`;
 const SEM: Record<string, { bg: string; color: string; label: string }> = {
   verde:    { bg: '#d1fae5', color: '#064e3b', label: '✓ OK' },
   amarillo: { bg: '#fef3c7', color: '#78350f', label: '⚠ Revisar' },
   rojo:     { bg: '#fee2e2', color: '#7f1d1d', label: '✗ Alerta' },
-}
-
-function exportCSV(files: EvidenciaFile[], analyses: Record<string, AnalysisResult>): void {
-  const headers = ['Folio','Archivo','URL_SharePoint','Semaforo','Tipo','Fecha','Monto','Referencia','Cliente','Banco','Folio_Presente','Observaciones','Tamaño','Modificado']
-  const rows = files.map(f => {
-    const a = analyses[f.id]
-    return [
-      f.folio, f.name, f.webUrl ?? '', a?.semaforo ?? 'sin_analizar', a?.tipo_documento ?? '',
-      a?.fecha ?? '', a?.monto ?? '', a?.referencia ?? '', a?.cliente_documento ?? '',
-      a?.banco_emisor ?? '', String(a?.folio_presente ?? ''), a?.observaciones ?? '',
-      fmtKB(f.size), new Date(f.modified).toLocaleDateString('es-MX'),
-    ].map(v => `"${String(v).replace(/"/g, '""')}"`)
-  })
-  const csv = [headers, ...rows].map(r => r.join(',')).join('\n')
-  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `Evidencias_${new Date().toISOString().slice(0, 10)}.csv`
-  a.click()
-  URL.revokeObjectURL(url)
-}
+};
 
 function AnalysisCard({ r }: { r: AnalysisResult }) {
   const s = SEM[r.semaforo] ?? SEM.amarillo
   return (
     <div style={{ marginTop: 8, padding: 10, background: '#f8faff', borderRadius: 8, border: '1px solid #e2e8f0', fontSize: 12 }}>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
         <span style={{ background: s.bg, color: s.color, fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20 }}>{s.label}</span>
-        {r.tipo_documento && (
-          <span style={{ background: '#dbeafe', color: '#1e3a8a', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20 }}>{r.tipo_documento}</span>
-        )}
+        <span style={{ background: '#dbeafe', color: '#1e3a8a', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20 }}>{r.tipo_documento}</span>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px', color: '#475569' }}>
-        {([['Fecha', r.fecha], ['Monto', r.monto != null ? fmtMXN(r.monto) : null],
-          ['Referencia', r.referencia], ['Cliente', r.cliente_documento], ['Banco', r.banco_emisor],
-        ] as [string, string | null][]).filter(([, v]) => v && v !== 'null').map(([k, v]) => (
-          <div key={k}><span style={{ color: '#94a3b8' }}>{k}: </span><strong>{v}</strong></div>
-        ))}
+        {[['Fecha', r.fecha], ['Monto', r.monto ? fmtMXN(r.monto) : null], ['Ref', r.referencia], ['Cliente', r.cliente_documento]].map(([k, v]) => 
+          v && <div key={k}><span style={{ color: '#94a3b8' }}>{k}: </span><strong>{v}</strong></div>
+        )}
       </div>
       {r.observaciones && <p style={{ margin: '6px 0 0', color: '#64748b', fontStyle: 'italic' }}>{r.observaciones}</p>}
     </div>
@@ -357,10 +295,7 @@ export default function App() {
   const [analyzingIds, setAnalyzingIds] = useState<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [basePath, setBasePath] = useState('Ventas')
-  const [search, setSearch] = useState('')
-  const [filterSem, setFilterSem] = useState('todos')
   const [preview, setPreview] = useState<EvidenciaFile | null>(null)
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const stopRef = useRef(false)
 
   useEffect(() => {
@@ -370,54 +305,26 @@ export default function App() {
       window.history.replaceState({}, '', window.location.pathname)
       pkceExchange(code).then(setToken).catch(e => setError(String(e)))
     } else {
-      const t = getStoredToken()
-      if (t) setToken(t)
+      const t = getStoredToken(); if (t) setToken(t)
     }
   }, [])
 
   useEffect(() => {
     if (!token) return
-    graphGet('https://graph.microsoft.com/v1.0/me', token)
-      .then(d => setUser(d as User))
-      .catch(() => {})
-    getSiteId(token)
-      .then(siteId => getEvidenciasDriveId(token, siteId))
-      .then(setDriveId)
-      .catch(e => setError('Error conectando a SharePoint: ' + String(e)))
+    graphGet('https://graph.microsoft.com/v1.0/me', token).then(setUser).catch(() => {})
+    getSiteId(token).then(id => getEvidenciasDriveId(token, id)).then(setDriveId).catch(e => setError(String(e)))
   }, [token])
-
-  const scan = useCallback(async () => {
-    if (!token || !driveId) return
-    setScanning(true)
-    setError(null)
-    setFiles([])
-    setAnalyses({})
-    try {
-      const found = await scanFolios(token, driveId, basePath, setScanProgress)
-      setFiles(found)
-    } catch (e) {
-      setError('Error escaneando: ' + String(e))
-    }
-    setScanning(false)
-    setScanProgress(null)
-  }, [token, driveId, basePath])
 
   const analyzeOne = useCallback(async (file: EvidenciaFile) => {
     if (!token) return
     setAnalyzingIds(prev => new Set(prev).add(file.id))
     try {
       const base64 = await getFileBase64(token, file.driveId, file.id)
-      const mime = getMimeType(file)
-      const result = await analyzeWithGemini(base64, mime, file.folio)
-      setAnalyses(prev => ({ ...prev, [file.id]: result }))
+      const res = await analyzeWithGemini(base64, file.mimeType || 'image/jpeg', file.folio)
+      setAnalyses(prev => ({ ...prev, [file.id]: res }))
     } catch (e) {
       setAnalyses(prev => ({
-        ...prev,
-        [file.id]: {
-          legible: false, tipo_documento: 'error', fecha: null, monto: null,
-          referencia: null, cliente_documento: null, banco_emisor: null,
-          folio_presente: null, observaciones: String(e), semaforo: 'rojo',
-        },
+        ...prev, [file.id]: { legible: false, tipo_documento: 'error', fecha: null, monto: null, referencia: null, cliente_documento: null, banco_emisor: null, folio_presente: null, observaciones: String(e), semaforo: 'rojo' }
       }))
     }
     setAnalyzingIds(prev => { const s = new Set(prev); s.delete(file.id); return s })
@@ -431,141 +338,62 @@ export default function App() {
       if (stopRef.current) break
       await analyzeOne(pending[i])
       setBatchProgress({ current: i + 1, total: pending.length })
-      // Un pequeño respiro para el Free Tier de Gemini
       if (i % 5 === 4) await new Promise(r => setTimeout(r, 1000))
     }
     setBatchProgress(null)
   }, [files, analyses, analyzeOne])
 
-  const openPreview = useCallback(async (file: EvidenciaFile) => {
-    if (!token) return
-    setPreview(file)
-    setPreviewUrl(null)
-    try {
-      const blob = await getFileBlob(token, file.driveId, file.id)
-      setPreviewUrl(URL.createObjectURL(blob))
-    } catch { /* preview failed silently */ }
-  }, [token])
-
-  const stats = {
-    total: files.length,
-    analizados: Object.keys(analyses).length,
-    verde: Object.values(analyses).filter(a => a.semaforo === 'verde').length,
-    amarillo: Object.values(analyses).filter(a => a.semaforo === 'amarillo').length,
-    rojo: Object.values(analyses).filter(a => a.semaforo === 'rojo').length,
-    monto: Object.values(analyses).reduce((s, a) => s + (a.monto ?? 0), 0),
-  }
-
-  const filtered = files.filter(f => {
-    const a = analyses[f.id]
-    const matchSearch = !search ||
-      f.folio.toLowerCase().includes(search.toLowerCase()) ||
-      f.name.toLowerCase().includes(search.toLowerCase())
-    if (filterSem === 'verde') return matchSearch && a?.semaforo === 'verde'
-    if (filterSem === 'amarillo') return matchSearch && a?.semaforo === 'amarillo'
-    if (filterSem === 'rojo') return matchSearch && a?.semaforo === 'rojo'
-    if (filterSem === 'pendiente') return matchSearch && !a
-    return matchSearch
-  })
-
-  if (!token) {
-    return (
-      <div style={{ minHeight: '100vh', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ background: '#fff', borderRadius: 16, padding: 48, textAlign: 'center', maxWidth: 400, width: '90%', boxShadow: '0 4px 24px rgba(0,0,0,0.08)' }}>
-          <div style={{ fontSize: 52, marginBottom: 12 }}>📋</div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, color: '#0f172a', margin: '0 0 8px' }}>EvidenciasIQ</h1>
-          <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 6px' }}>Auditoría Automática con Gemini IA</p>
-          <p style={{ color: '#94a3b8', fontSize: 12, margin: '0 0 28px' }}>Flor de Tabasco · Planeación Financiera</p>
-          {error && <div style={{ background: '#fee2e2', color: '#7f1d1d', borderRadius: 8, padding: 10, marginBottom: 16, fontSize: 12 }}>{error}</div>}
-          <button onClick={pkceLogin} style={{ background: '#0078d4', color: '#fff', border: 'none', borderRadius: 10, padding: '13px 0', fontSize: 14, fontWeight: 700, cursor: 'pointer', width: '100%' }}>🔐 Iniciar sesión Microsoft</button>
-        </div>
-      </div>
-    )
-  }
+  if (!token) return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f1f5f9' }}>
+      <button onClick={pkceLogin} style={{ padding: '12px 24px', background: '#0078d4', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>🔐 Iniciar Sesión con Microsoft</button>
+    </div>
+  )
 
   return (
-    <div style={{ background: '#f1f5f9', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' }}>
-      <div style={{ background: 'linear-gradient(135deg,#0f172a,#1e3a5f)', padding: '14px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ width: 34, height: 34, background: '#0078d4', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>📋</div>
-          <div>
-            <p style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>EvidenciasIQ</p>
-            <p style={{ color: '#94a3b8', fontSize: 11, margin: 0 }}>{user?.displayName ?? 'Cargando...'} · Planeación</p>
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {files.length > 0 && !batchProgress && (
-            <button onClick={analyzeAll} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>🤖 Analizar todo ({files.filter(f => !analyses[f.id]).length})</button>
-          )}
-          {batchProgress && (
-            <button onClick={() => { stopRef.current = true }} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>⏹ Detener</button>
-          )}
-          <button onClick={() => { clearAuth(); setToken(null) }} style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '8px 12px', fontSize: 12, cursor: 'pointer' }}>Salir</button>
+    <div style={{ background: '#f1f5f9', minHeight: '100vh', fontFamily: 'sans-serif' }}>
+      <div style={{ background: '#0f172a', padding: '12px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: '#fff' }}>
+        <div><strong>EvidenciasIQ</strong> <span style={{ fontSize: 12, opacity: 0.7 }}>| {user?.displayName}</span></div>
+        <div style={{ display: 'flex', gap: 10 }}>
+          {files.length > 0 && <button onClick={analyzeAll} style={{ background: '#7c3aed', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>🤖 Analizar Todo ({files.length - Object.keys(analyses).length})</button>}
+          <button onClick={() => { clearAuth(); setToken(null) }} style={{ background: 'transparent', border: '1px solid #334155', color: '#fff', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer' }}>Salir</button>
         </div>
       </div>
 
-      <div style={{ padding: 20, maxWidth: 1300, margin: '0 auto' }}>
-        <div style={{ background: '#fff', borderRadius: 12, padding: 18, border: '1px solid #e2e8f0', marginBottom: 16 }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>CARPETA EN SHAREPOINT</label>
-              <input value={basePath} onChange={e => setBasePath(e.target.value)} style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 12px', fontSize: 13 }} />
-            </div>
-            <button onClick={scan} disabled={scanning || !driveId} style={{ background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', fontSize: 13, fontWeight: 600, cursor: scanning ? 'not-allowed' : 'pointer' }}>{scanning ? 'Escaneando...' : '📂 Escanear Carpetas'}</button>
+      <div style={{ padding: 20, maxWidth: 1200, margin: '0 auto' }}>
+        <div style={{ background: '#fff', padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', marginBottom: 20, display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+          <div style={{ flex: 1 }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b' }}>CARPETA SHAREPOINT</label>
+            <input value={basePath} onChange={e => setBasePath(e.target.value)} style={{ width: '100%', padding: '8px', borderRadius: 6, border: '1px solid #e2e8f0', marginTop: 4 }} />
           </div>
-          {scanProgress && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b' }}>
-                <span>{scanProgress.current_folio}</span>
-                <span>{scanProgress.current}/{scanProgress.total}</span>
-              </div>
-              <div style={{ background: '#e2e8f0', height: 6, borderRadius: 4, marginTop: 4 }}>
-                <div style={{ background: '#3b82f6', height: '100%', borderRadius: 4, width: `${(scanProgress.current/scanProgress.total)*100}%` }} />
-              </div>
-            </div>
-          )}
+          <button onClick={async () => { setScanning(true); setFiles(await scanFolios(token, driveId!, basePath, setScanProgress)); setScanning(false) }} style={{ background: '#1e40af', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: 8, fontWeight: 600, cursor: 'pointer' }}>{scanning ? 'Escaneando...' : '📂 Escanear'}</button>
         </div>
 
-        {files.length > 0 && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 16 }}>
-            {[ ['Total', stats.total, '#1e40af'], ['Analizados', stats.analizados, '#0f766e'], ['✓ OK', stats.verde, '#059669'], ['⚠ Revisar', stats.amarillo, '#d97706'], ['✗ Alertas', stats.rojo, '#dc2626'], ['Total MXN', fmtMXN(stats.monto), '#4c1d95'] ].map(([l, v, c]) => (
-              <div key={l as string} style={{ background: '#fff', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', textAlign: 'center' }}>
-                <p style={{ margin: 0, fontSize: 10, color: '#94a3b8', fontWeight: 700 }}>{l}</p>
-                <p style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 800, color: c as string }}>{v}</p>
-              </div>
-            ))}
+        {batchProgress && (
+          <div style={{ background: '#ede9fe', padding: 12, borderRadius: 8, marginBottom: 15, border: '1px solid #ddd6fe' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 5 }}><span>Analizando con Gemini...</span> <span>{batchProgress.current}/{batchProgress.total}</span></div>
+            <div style={{ background: '#ddd6fe', height: 6, borderRadius: 4 }}><div style={{ background: '#7c3aed', height: '100%', borderRadius: 4, width: `${(batchProgress.current/batchProgress.total)*100}%` }} /></div>
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: preview ? '1fr 400px' : '1fr', gap: 16 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {filtered.slice(0, 100).map(file => {
-              const a = analyses[file.id]; const isAnalyzing = analyzingIds.has(file.id)
-              return (
-                <div key={file.id} onClick={() => openPreview(file)} style={{ background: '#fff', padding: 14, borderRadius: 10, border: `1px solid ${preview?.id === file.id ? '#3b82f6' : '#e2e8f0'}`, cursor: 'pointer' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <div style={{ flex: 1 }}>
-                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>{file.folio} <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 11 }}>{file.name}</span></p>
-                      {a && <AnalysisCard r={a} />}
-                    </div>
-                    <button onClick={e => { e.stopPropagation(); analyzeOne(file) }} disabled={isAnalyzing} style={{ border: 'none', background: a ? '#f1f5f9' : '#7c3aed', color: a ? '#64748b' : '#fff', borderRadius: 6, padding: '4px 8px', fontSize: 11, height: 'fit-content' }}>{isAnalyzing ? '...' : a ? '↻' : '🤖'}</button>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 350px', gap: 20 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {files.map(f => (
+              <div key={f.id} onClick={() => setPreview(f)} style={{ background: '#fff', padding: 12, borderRadius: 10, border: `1px solid ${preview?.id === f.id ? '#3b82f6' : '#e2e8f0'}`, cursor: 'pointer' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>{f.folio} <span style={{ fontWeight: 400, color: '#94a3b8' }}>{f.name}</span></div>
+                    {analyses[f.id] && <AnalysisCard r={analyses[f.id]} />}
                   </div>
+                  <button onClick={e => { e.stopPropagation(); analyzeOne(f) }} disabled={analyzingIds.has(f.id)} style={{ border: 'none', background: analyses[f.id] ? '#f1f5f9' : '#7c3aed', color: analyses[f.id] ? '#64748b' : '#fff', borderRadius: 6, padding: '4px 8px', fontSize: 11, cursor: 'pointer', height: 'fit-content' }}>{analyzingIds.has(f.id) ? '...' : analyses[f.id] ? '↻' : '🤖'}</button>
                 </div>
-              )
-            })}
+              </div>
+            ))}
           </div>
           {preview && (
-            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0', position: 'sticky', top: 20, maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: 12, borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between' }}>
-                <strong style={{ fontSize: 13 }}>Vista Previa: {preview.folio}</strong>
-                <button onClick={() => setPreview(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}>✕</button>
-              </div>
-              <div style={{ flex: 1, overflow: 'auto', background: '#f8faff', padding: 10 }}>
-                {previewUrl ? (
-                  preview.name.toLowerCase().endsWith('.pdf') 
-                  ? <embed src={previewUrl} type="application/pdf" style={{ width: '100%', height: '400px' }} />
-                  : <img src={previewUrl} style={{ width: '100%', borderRadius: 8 }} />
-                ) : <p>Cargando...</p>}
+            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0', position: 'sticky', top: 20, height: 'calc(100vh - 100px)', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: 10, borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between' }}><strong>{preview.folio}</strong> <button onClick={() => setPreview(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}>✕</button></div>
+              <div style={{ flex: 1, padding: 10, overflow: 'auto', background: '#f8faff' }}>
+                 {preview.name.toLowerCase().endsWith('.pdf') ? <iframe src={proxyUrl(token, preview.driveId, preview.id)} style={{ width: '100%', height: '100%', border: 'none' }} /> : <img src={proxyUrl(token, preview.driveId, preview.id)} style={{ width: '100%' }} />}
               </div>
             </div>
           )}
