@@ -124,12 +124,6 @@ async function graphGet(url: string, token: string): Promise<any> {
   return res.json()
 }
 
-async function graphBlob(url: string, token: string): Promise<Blob> {
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-  if (!res.ok) throw new Error(`Graph blob ${res.status}`)
-  return res.blob()
-}
-
 async function getSiteId(token: string): Promise<string> {
   const data = await graphGet(
     `https://graph.microsoft.com/v1.0/sites/${CONFIG.siteHostname}:${CONFIG.sitePath}`,
@@ -198,22 +192,20 @@ async function scanFolios(
           })
         }
       }
-    } catch {
-      // skip inaccessible folder
-    }
+    } catch { /* skip inaccessible folder */ }
   }
   return results
 }
 
-// Use Vercel edge proxy to avoid SharePoint CORS restrictions
 function proxyUrl(token: string, driveId: string, fileId: string): string {
   const params = new URLSearchParams({ driveId, fileId, token })
   return `/api/file?${params}`
 }
 
-async function getFileBase64(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<string> {
-  const blob = await fetch(proxyUrl(token, driveId, fileId))
-    .then(r => { if (!r.ok) throw new Error(`Proxy ${r.status}`); return r.blob(); })
+async function getFileBase64(token: string, driveId: string, fileId: string): Promise<string> {
+  const res = await fetch(proxyUrl(token, driveId, fileId))
+  if (!res.ok) throw new Error(`Proxy ${res.status}`)
+  const blob = await res.blob()
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.onloadend = () => {
@@ -225,13 +217,14 @@ async function getFileBase64(token: string, driveId: string, fileId: string, _do
   })
 }
 
-async function getFileBlob(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<Blob> {
-  return fetch(proxyUrl(token, driveId, fileId))
-    .then(r => { if (!r.ok) throw new Error(`Proxy ${r.status}`); return r.blob(); })
+async function getFileBlob(token: string, driveId: string, fileId: string): Promise<Blob> {
+  const res = await fetch(proxyUrl(token, driveId, fileId))
+  if (!res.ok) throw new Error(`Proxy ${res.status}`)
+  return res.blob()
 }
 
 // ============================================================
-// CLAUDE VISION
+// GEMINI VISION (Migración desde Claude)
 // ============================================================
 function getMimeType(file: EvidenciaFile): string {
   if (file.mimeType) return file.mimeType
@@ -243,13 +236,13 @@ function getMimeType(file: EvidenciaFile): string {
   return map[ext] ?? 'image/jpeg'
 }
 
-async function analyzeWithClaude(
+async function analyzeWithGemini(
   base64: string,
   mimeType: string,
   folio: string
 ): Promise<AnalysisResult> {
   const isPdf = mimeType.includes('pdf')
-  const prompt = `Eres auditor financiero. Analiza esta evidencia de pago del folio "${folio}".
+  const prompt = `Eres auditor financiero de "Flor de Tabasco". Analiza esta evidencia de pago del folio "${folio}".
 Extrae y responde SOLO con JSON válido sin texto adicional:
 {
   "legible": true,
@@ -265,19 +258,19 @@ Extrae y responde SOLO con JSON válido sin texto adicional:
 }
 semaforo: verde=todo correcto, amarillo=datos parciales, rojo=ilegible o inconsistente`
 
-  const imageContent = isPdf
-    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
-    : { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } }
+  const contentPart = { 
+    type: isPdf ? 'document' : 'image', 
+    source: { type: 'base64', media_type: mimeType, data: base64 } 
+  }
 
-  const res = await fetch('/api/claude', {
+  const res = await fetch('/api/gemini', { // Debe existir api/gemini.js en tu carpeta api/
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 500,
-      messages: [{ role: 'user', content: [imageContent, { type: 'text', text: prompt }] }],
+      messages: [{ role: 'user', content: [contentPart, { type: 'text', text: prompt }] }],
     }),
   })
+  
   const data = await res.json()
   const text: string = data.content?.[0]?.text ?? '{}'
   try {
@@ -286,7 +279,7 @@ semaforo: verde=todo correcto, amarillo=datos parciales, rojo=ilegible o inconsi
     return {
       legible: false, tipo_documento: 'error_parse', fecha: null, monto: null,
       referencia: null, cliente_documento: null, banco_emisor: null,
-      folio_presente: null, observaciones: text.slice(0, 120), semaforo: 'rojo',
+      folio_presente: null, observaciones: 'Error al procesar JSON de IA', semaforo: 'rojo',
     }
   }
 }
@@ -327,9 +320,6 @@ function exportCSV(files: EvidenciaFile[], analyses: Record<string, AnalysisResu
   URL.revokeObjectURL(url)
 }
 
-// ============================================================
-// COMPONENTS
-// ============================================================
 function AnalysisCard({ r }: { r: AnalysisResult }) {
   const s = SEM[r.semaforo] ?? SEM.amarillo
   return (
@@ -338,9 +328,6 @@ function AnalysisCard({ r }: { r: AnalysisResult }) {
         <span style={{ background: s.bg, color: s.color, fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20 }}>{s.label}</span>
         {r.tipo_documento && (
           <span style={{ background: '#dbeafe', color: '#1e3a8a', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20 }}>{r.tipo_documento}</span>
-        )}
-        {!r.legible && (
-          <span style={{ background: '#fee2e2', color: '#7f1d1d', fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 20 }}>Ilegible</span>
         )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px', color: '#475569' }}>
@@ -376,7 +363,6 @@ export default function App() {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const stopRef = useRef(false)
 
-  // Handle OAuth callback
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const code = params.get('code')
@@ -389,7 +375,6 @@ export default function App() {
     }
   }, [])
 
-  // Load user + drive when token available
   useEffect(() => {
     if (!token) return
     graphGet('https://graph.microsoft.com/v1.0/me', token)
@@ -421,9 +406,9 @@ export default function App() {
     if (!token) return
     setAnalyzingIds(prev => new Set(prev).add(file.id))
     try {
-      const base64 = await getFileBase64(token, file.driveId, file.id, file.downloadUrl)
+      const base64 = await getFileBase64(token, file.driveId, file.id)
       const mime = getMimeType(file)
-      const result = await analyzeWithClaude(base64, mime, file.folio)
+      const result = await analyzeWithGemini(base64, mime, file.folio)
       setAnalyses(prev => ({ ...prev, [file.id]: result }))
     } catch (e) {
       setAnalyses(prev => ({
@@ -446,7 +431,8 @@ export default function App() {
       if (stopRef.current) break
       await analyzeOne(pending[i])
       setBatchProgress({ current: i + 1, total: pending.length })
-      if (i % 10 === 9) await new Promise(r => setTimeout(r, 800))
+      // Un pequeño respiro para el Free Tier de Gemini
+      if (i % 5 === 4) await new Promise(r => setTimeout(r, 1000))
     }
     setBatchProgress(null)
   }, [files, analyses, analyzeOne])
@@ -456,11 +442,9 @@ export default function App() {
     setPreview(file)
     setPreviewUrl(null)
     try {
-      const blob = await getFileBlob(token, file.driveId, file.id, file.downloadUrl)
+      const blob = await getFileBlob(token, file.driveId, file.id)
       setPreviewUrl(URL.createObjectURL(blob))
-    } catch {
-      // preview failed silently
-    }
+    } catch { /* preview failed silently */ }
   }, [token])
 
   const stats = {
@@ -484,253 +468,104 @@ export default function App() {
     return matchSearch
   })
 
-  // ---- LOGIN SCREEN ----
   if (!token) {
     return (
       <div style={{ minHeight: '100vh', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <div style={{ background: '#fff', borderRadius: 16, padding: 48, textAlign: 'center', maxWidth: 400, width: '90%', boxShadow: '0 4px 24px rgba(0,0,0,0.08)' }}>
           <div style={{ fontSize: 52, marginBottom: 12 }}>📋</div>
           <h1 style={{ fontSize: 22, fontWeight: 800, color: '#0f172a', margin: '0 0 8px' }}>EvidenciasIQ</h1>
-          <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 6px' }}>Verificación automática de evidencias con IA</p>
-          <p style={{ color: '#94a3b8', fontSize: 12, margin: '0 0 28px' }}>SharePoint · Claude Vision · Flor de Tabasco</p>
+          <p style={{ color: '#64748b', fontSize: 13, margin: '0 0 6px' }}>Auditoría Automática con Gemini IA</p>
+          <p style={{ color: '#94a3b8', fontSize: 12, margin: '0 0 28px' }}>Flor de Tabasco · Planeación Financiera</p>
           {error && <div style={{ background: '#fee2e2', color: '#7f1d1d', borderRadius: 8, padding: 10, marginBottom: 16, fontSize: 12 }}>{error}</div>}
-          <button
-            onClick={pkceLogin}
-            style={{ background: '#0078d4', color: '#fff', border: 'none', borderRadius: 10, padding: '13px 0', fontSize: 14, fontWeight: 700, cursor: 'pointer', width: '100%' }}
-          >
-            🔐 Iniciar sesión con Microsoft
-          </button>
+          <button onClick={pkceLogin} style={{ background: '#0078d4', color: '#fff', border: 'none', borderRadius: 10, padding: '13px 0', fontSize: 14, fontWeight: 700, cursor: 'pointer', width: '100%' }}>🔐 Iniciar sesión Microsoft</button>
         </div>
       </div>
     )
   }
 
-  // ---- MAIN APP ----
   return (
-    <div style={{ background: '#f1f5f9', minHeight: '100vh' }}>
-      {/* HEADER */}
+    <div style={{ background: '#f1f5f9', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ background: 'linear-gradient(135deg,#0f172a,#1e3a5f)', padding: '14px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ width: 34, height: 34, background: '#0078d4', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>📋</div>
           <div>
             <p style={{ color: '#fff', fontSize: 15, fontWeight: 700, margin: 0 }}>EvidenciasIQ</p>
-            <p style={{ color: '#94a3b8', fontSize: 11, margin: 0 }}>{user?.displayName ?? '...'} · PlaneaciónFinanciera</p>
+            <p style={{ color: '#94a3b8', fontSize: 11, margin: 0 }}>{user?.displayName ?? 'Cargando...'} · Planeación</p>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8 }}>
           {files.length > 0 && !batchProgress && (
-            <button onClick={analyzeAll} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-              🤖 Analizar todo ({files.filter(f => !analyses[f.id]).length})
-            </button>
+            <button onClick={analyzeAll} style={{ background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>🤖 Analizar todo ({files.filter(f => !analyses[f.id]).length})</button>
           )}
           {batchProgress && (
-            <button onClick={() => { stopRef.current = true }} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-              ⏹ Detener
-            </button>
+            <button onClick={() => { stopRef.current = true }} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>⏹ Detener</button>
           )}
-          {files.length > 0 && stats.analizados > 0 && (
-            <button onClick={() => exportCSV(files, analyses)} style={{ background: '#059669', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-              ⬇ Exportar CSV
-            </button>
-          )}
-          <button onClick={() => { clearAuth(); setToken(null) }} style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '8px 12px', fontSize: 12, cursor: 'pointer' }}>
-            Salir
-          </button>
+          <button onClick={() => { clearAuth(); setToken(null) }} style={{ background: 'rgba(255,255,255,0.1)', color: '#fff', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '8px 12px', fontSize: 12, cursor: 'pointer' }}>Salir</button>
         </div>
       </div>
 
       <div style={{ padding: 20, maxWidth: 1300, margin: '0 auto' }}>
-        {error && (
-          <div style={{ background: '#fee2e2', border: '1px solid #fecaca', borderRadius: 10, padding: 12, marginBottom: 14, color: '#7f1d1d', fontSize: 13 }}>
-            ⚠️ {error}
-          </div>
-        )}
-
-        {/* SCAN BAR */}
         <div style={{ background: '#fff', borderRadius: 12, padding: 18, border: '1px solid #e2e8f0', marginBottom: 16 }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-            <div style={{ flex: 1, minWidth: 220 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: 4 }}>
-                Carpeta dentro de la biblioteca Evidencias
-              </label>
-              <input
-                value={basePath}
-                onChange={e => setBasePath(e.target.value)}
-                style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 12px', fontSize: 13, boxSizing: 'border-box' as const }}
-              />
+          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+            <div style={{ flex: 1 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: '#64748b', display: 'block', marginBottom: 4 }}>CARPETA EN SHAREPOINT</label>
+              <input value={basePath} onChange={e => setBasePath(e.target.value)} style={{ width: '100%', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 12px', fontSize: 13 }} />
             </div>
-            <button
-              onClick={scan}
-              disabled={scanning || !driveId}
-              style={{ background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', fontSize: 13, fontWeight: 600, cursor: scanning ? 'not-allowed' : 'pointer', opacity: scanning ? 0.7 : 1 }}
-            >
-              {scanning ? 'Escaneando...' : driveId ? '📂 Escanear carpetas' : 'Conectando...'}
-            </button>
+            <button onClick={scan} disabled={scanning || !driveId} style={{ background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, padding: '10px 20px', fontSize: 13, fontWeight: 600, cursor: scanning ? 'not-allowed' : 'pointer' }}>{scanning ? 'Escaneando...' : '📂 Escanear Carpetas'}</button>
           </div>
-
           {scanProgress && (
             <div style={{ marginTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b', marginBottom: 4 }}>
-                <span>{scanProgress.current_folio ?? 'Leyendo...'}</span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b' }}>
+                <span>{scanProgress.current_folio}</span>
                 <span>{scanProgress.current}/{scanProgress.total}</span>
               </div>
-              <div style={{ background: '#e2e8f0', borderRadius: 4, height: 6 }}>
-                <div style={{ background: '#3b82f6', height: '100%', borderRadius: 4, width: `${scanProgress.total ? (scanProgress.current / scanProgress.total * 100) : 0}%`, transition: 'width 0.3s' }} />
-              </div>
-            </div>
-          )}
-
-          {batchProgress && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#64748b', marginBottom: 4 }}>
-                <span>🤖 Analizando con IA...</span>
-                <span>{batchProgress.current}/{batchProgress.total}</span>
-              </div>
-              <div style={{ background: '#e2e8f0', borderRadius: 4, height: 6 }}>
-                <div style={{ background: '#7c3aed', height: '100%', borderRadius: 4, width: `${batchProgress.total ? (batchProgress.current / batchProgress.total * 100) : 0}%`, transition: 'width 0.3s' }} />
+              <div style={{ background: '#e2e8f0', height: 6, borderRadius: 4, marginTop: 4 }}>
+                <div style={{ background: '#3b82f6', height: '100%', borderRadius: 4, width: `${(scanProgress.current/scanProgress.total)*100}%` }} />
               </div>
             </div>
           )}
         </div>
 
-        {/* KPIs */}
         {files.length > 0 && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 10, marginBottom: 16 }}>
-            {([
-              ['Archivos', stats.total, '#1e40af', '#dbeafe'],
-              ['Analizados', stats.analizados, '#0f766e', '#ccfbf1'],
-              ['✓ OK', stats.verde, '#064e3b', '#d1fae5'],
-              ['⚠ Revisar', stats.amarillo, '#78350f', '#fef3c7'],
-              ['✗ Alertas', stats.rojo, '#7f1d1d', '#fee2e2'],
-              ['Monto total', fmtMXN(stats.monto), '#4c1d95', '#ede9fe'],
-            ] as [string, string | number, string, string][]).map(([lbl, val, c, bg]) => (
-              <div key={lbl} style={{ background: '#fff', borderRadius: 10, padding: 12, border: '1px solid #e2e8f0', textAlign: 'center' }}>
-                <p style={{ fontSize: 10, color: '#94a3b8', margin: 0, fontWeight: 700, textTransform: 'uppercase' }}>{lbl}</p>
-                <p style={{ fontSize: typeof val === 'string' && val.length > 8 ? 12 : 20, fontWeight: 800, color: c, margin: '4px 0 0' }}>{val}</p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10, marginBottom: 16 }}>
+            {[ ['Total', stats.total, '#1e40af'], ['Analizados', stats.analizados, '#0f766e'], ['✓ OK', stats.verde, '#059669'], ['⚠ Revisar', stats.amarillo, '#d97706'], ['✗ Alertas', stats.rojo, '#dc2626'], ['Total MXN', fmtMXN(stats.monto), '#4c1d95'] ].map(([l, v, c]) => (
+              <div key={l as string} style={{ background: '#fff', padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', textAlign: 'center' }}>
+                <p style={{ margin: 0, fontSize: 10, color: '#94a3b8', fontWeight: 700 }}>{l}</p>
+                <p style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 800, color: c as string }}>{v}</p>
               </div>
             ))}
-          </div>
-        )}
-
-        {/* FILTERS */}
-        {files.length > 0 && (
-          <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="🔍 Buscar folio o archivo..."
-              style={{ flex: 1, minWidth: 180, border: '1px solid #e2e8f0', borderRadius: 8, padding: '7px 12px', fontSize: 13, background: '#fff' }}
-            />
-            {(['todos', 'verde', 'amarillo', 'rojo', 'pendiente'] as const).map(f => (
-              <button
-                key={f}
-                onClick={() => setFilterSem(f)}
-                style={{
-                  padding: '7px 14px', borderRadius: 20, fontSize: 12, fontWeight: 600, border: '2px solid',
-                  borderColor: filterSem === f ? '#3b82f6' : '#e2e8f0',
-                  background: filterSem === f ? '#eff6ff' : '#fff',
-                  color: filterSem === f ? '#1e40af' : '#64748b', cursor: 'pointer',
-                }}
-              >
-                {f === 'todos' ? `Todos (${files.length})` :
-                 f === 'verde' ? `✓ OK (${stats.verde})` :
-                 f === 'amarillo' ? `⚠ Revisar (${stats.amarillo})` :
-                 f === 'rojo' ? `✗ Alertas (${stats.rojo})` :
-                 `Pendiente (${files.length - stats.analizados})`}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* CONTENT */}
-        {files.length === 0 && !scanning && (
-          <div style={{ background: '#fff', borderRadius: 12, padding: 60, textAlign: 'center', border: '1px solid #e2e8f0' }}>
-            <div style={{ fontSize: 44, marginBottom: 12 }}>📁</div>
-            <p style={{ color: '#0f172a', fontWeight: 700, fontSize: 15 }}>Ruta configurada: <code style={{ background: '#f1f5f9', padding: '2px 8px', borderRadius: 4 }}>{basePath}</code></p>
-            <p style={{ color: '#64748b', fontSize: 13, marginTop: 8 }}>Haz clic en "Escanear carpetas" para leer todos los folios</p>
           </div>
         )}
 
         <div style={{ display: 'grid', gridTemplateColumns: preview ? '1fr 400px' : '1fr', gap: 16 }}>
-          {/* FILE LIST */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {filtered.slice(0, 200).map(file => {
-              const a = analyses[file.id]
-              const isAnalyzing = analyzingIds.has(file.id)
-              const isPdf = file.name.toLowerCase().endsWith('.pdf')
-              const sem = a?.semaforo
-              const rowBg = sem === 'verde' ? '#f0fdf4' : sem === 'amarillo' ? '#fffbeb' : sem === 'rojo' ? '#fef2f2' : '#fff'
-
+            {filtered.slice(0, 100).map(file => {
+              const a = analyses[file.id]; const isAnalyzing = analyzingIds.has(file.id)
               return (
-                <div
-                  key={file.id}
-                  onClick={() => openPreview(file)}
-                  style={{ background: rowBg, borderRadius: 10, padding: 14, border: `1px solid ${preview?.id === file.id ? '#3b82f6' : '#e2e8f0'}`, cursor: 'pointer' }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 3 }}>
-                        <span style={{ fontSize: 16 }}>{isPdf ? '📄' : '🖼️'}</span>
-                        <strong style={{ fontSize: 13, color: '#0f172a' }}>{file.folio}</strong>
-                        <span style={{ fontSize: 11, color: '#94a3b8' }}>{file.name}</span>
-                        {sem && SEM[sem] && (
-                          <span style={{ background: SEM[sem].bg, color: SEM[sem].color, fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 20 }}>
-                            {SEM[sem].label}
-                          </span>
-                        )}
-                      </div>
-                      <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>
-                        {fmtKB(file.size)} · {new Date(file.modified).toLocaleDateString('es-MX')}
-                      </p>
+                <div key={file.id} onClick={() => openPreview(file)} style={{ background: '#fff', padding: 14, borderRadius: 10, border: `1px solid ${preview?.id === file.id ? '#3b82f6' : '#e2e8f0'}`, cursor: 'pointer' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700 }}>{file.folio} <span style={{ fontWeight: 400, color: '#94a3b8', fontSize: 11 }}>{file.name}</span></p>
                       {a && <AnalysisCard r={a} />}
                     </div>
-                    <button
-                      onClick={e => { e.stopPropagation(); analyzeOne(file) }}
-                      disabled={isAnalyzing}
-                      style={{ flexShrink: 0, background: isAnalyzing ? '#f1f5f9' : a ? '#f1f5f9' : '#7c3aed', color: isAnalyzing ? '#94a3b8' : a ? '#64748b' : '#fff', border: 'none', borderRadius: 8, padding: '6px 11px', fontSize: 11, fontWeight: 600, cursor: isAnalyzing ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap' }}
-                    >
-                      {isAnalyzing ? '⏳' : a ? '↻' : '🤖'}
-                    </button>
+                    <button onClick={e => { e.stopPropagation(); analyzeOne(file) }} disabled={isAnalyzing} style={{ border: 'none', background: a ? '#f1f5f9' : '#7c3aed', color: a ? '#64748b' : '#fff', borderRadius: 6, padding: '4px 8px', fontSize: 11, height: 'fit-content' }}>{isAnalyzing ? '...' : a ? '↻' : '🤖'}</button>
                   </div>
                 </div>
               )
             })}
-            {filtered.length > 200 && (
-              <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 12, padding: 12 }}>
-                Mostrando 200 de {filtered.length} — usa el buscador para filtrar
-              </p>
-            )}
           </div>
-
-          {/* PREVIEW PANEL */}
           {preview && (
-            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0', overflow: 'hidden', position: 'sticky', top: 16, maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{preview.folio}</p>
-                  <p style={{ margin: 0, fontSize: 11, color: '#94a3b8' }}>{preview.name}</p>
-                </div>
-                <button onClick={() => { setPreview(null); setPreviewUrl(null) }} style={{ background: 'none', border: 'none', fontSize: 18, cursor: 'pointer', color: '#64748b' }}>✕</button>
+            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0', position: 'sticky', top: 20, maxHeight: '85vh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+              <div style={{ padding: 12, borderBottom: '1px solid #f1f5f9', display: 'flex', justifyContent: 'space-between' }}>
+                <strong style={{ fontSize: 13 }}>Vista Previa: {preview.folio}</strong>
+                <button onClick={() => setPreview(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}>✕</button>
               </div>
-              <div style={{ flex: 1, overflow: 'auto', padding: 12, background: '#f8faff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {previewUrl
-                  ? preview.name.toLowerCase().endsWith('.pdf')
-                    ? <embed src={previewUrl} type="application/pdf" style={{ width: '100%', height: 480 }} />
-                    : <img src={previewUrl} alt={preview.name} style={{ maxWidth: '100%', maxHeight: 480, borderRadius: 6, objectFit: 'contain' }} />
-                  : <p style={{ color: '#94a3b8', fontSize: 13 }}>Cargando...</p>}
-              </div>
-              <div style={{ padding: 12, borderTop: '1px solid #f1f5f9' }}>
-                {analyses[preview.id]
-                  ? <AnalysisCard r={analyses[preview.id]} />
-                  : (
-                    <button
-                      onClick={() => analyzeOne(preview)}
-                      disabled={analyzingIds.has(preview.id)}
-                      style={{ width: '100%', background: '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, padding: 10, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
-                    >
-                      {analyzingIds.has(preview.id) ? '⏳ Analizando...' : '🤖 Analizar esta evidencia'}
-                    </button>
-                  )}
+              <div style={{ flex: 1, overflow: 'auto', background: '#f8faff', padding: 10 }}>
+                {previewUrl ? (
+                  preview.name.toLowerCase().endsWith('.pdf') 
+                  ? <embed src={previewUrl} type="application/pdf" style={{ width: '100%', height: '400px' }} />
+                  : <img src={previewUrl} style={{ width: '100%', borderRadius: 8 }} />
+                ) : <p>Cargando...</p>}
               </div>
             </div>
           )}
