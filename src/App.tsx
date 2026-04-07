@@ -35,6 +35,8 @@ interface AnalysisResult {
   cliente_documento: string | null
   banco_emisor: string | null
   folio_presente: boolean | null
+  num_skus: number | null
+  presentaciones: string[]
   observaciones: string
   semaforo: 'verde' | 'amarillo' | 'rojo'
 }
@@ -211,18 +213,56 @@ function proxyUrl(token: string, driveId: string, fileId: string): string {
   return `/api/file?${params}`
 }
 
+async function compressImage(blob: Blob, maxSizeMB = 3): Promise<string> {
+  // If small enough, just convert directly
+  if (blob.size <= maxSizeMB * 1024 * 1024 && !blob.type.includes('pdf')) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve((reader.result as string).split(',')[1])
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }
+  // For PDFs return as-is (no compression possible)
+  if (blob.type.includes('pdf')) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve((reader.result as string).split(',')[1])
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+  }
+  // Compress image using canvas
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob)
+    const img = new Image()
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      let { width, height } = img
+      // Scale down if needed
+      const maxDim = 1600
+      if (width > maxDim || height > maxDim) {
+        const ratio = Math.min(maxDim / width, maxDim / height)
+        width = Math.round(width * ratio)
+        height = Math.round(height * ratio)
+      }
+      canvas.width = width
+      canvas.height = height
+      const ctx = canvas.getContext('2d')!
+      ctx.drawImage(img, 0, 0, width, height)
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82)
+      URL.revokeObjectURL(url)
+      resolve(dataUrl.split(',')[1])
+    }
+    img.onerror = reject
+    img.src = url
+  })
+}
+
 async function getFileBase64(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<string> {
   const blob = await fetch(proxyUrl(token, driveId, fileId))
     .then(r => { if (!r.ok) throw new Error(`Proxy ${r.status}`); return r.blob(); })
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onloadend = () => {
-      const result = reader.result as string
-      resolve(result.split(',')[1])
-    }
-    reader.onerror = reject
-    reader.readAsDataURL(blob)
-  })
+  return compressImage(blob)
 }
 
 async function getFileBlob(token: string, driveId: string, fileId: string, _downloadUrl?: string | null): Promise<Blob> {
@@ -249,21 +289,29 @@ async function analyzeWithClaude(
   folio: string
 ): Promise<AnalysisResult> {
   const isPdf = mimeType.includes('pdf')
-  const prompt = `Eres auditor financiero. Analiza esta evidencia de pago del folio "${folio}".
-Extrae y responde SOLO con JSON válido sin texto adicional:
+  const prompt = `Eres auditor financiero especializado en bebidas. Analiza esta evidencia del folio "${folio}".
+
+La empresa vende horchata en estas presentaciones: Galón 3.785L, 2 Litros, 1 Litro, 700ml, 500ml, 250ml, Bag in Box 20L, Mosaico 1L, Mosaico Galón.
+
+Extrae y responde SOLO con JSON válido sin texto adicional ni markdown:
 {
   "legible": true,
-  "tipo_documento": "transferencia|ticket_caja|factura|remision|foto_entrega|comprobante_pago|otro",
+  "tipo_documento": "transferencia|ticket_caja|factura|remision|nota_entrega|comprobante_pago|otro",
   "fecha": "DD/MM/YYYY o null",
   "monto": 1234.56,
-  "referencia": "numero de operacion o null",
-  "cliente_documento": "nombre del cliente o null",
-  "banco_emisor": "banco o null",
+  "referencia": "numero de operacion, folio o nota o null",
+  "cliente_documento": "nombre del cliente o receptor o null",
+  "banco_emisor": "banco o institucion o null",
   "folio_presente": true,
-  "observaciones": "una línea máximo",
+  "num_skus": 3,
+  "presentaciones": ["Galón 3.785L", "1 Litro", "700ml"],
+  "observaciones": "una línea máximo con lo más relevante para conciliación",
   "semaforo": "verde|amarillo|rojo"
 }
-semaforo: verde=todo correcto, amarillo=datos parciales, rojo=ilegible o inconsistente`
+
+num_skus: número de líneas de producto distintas visibles en el documento (null si no aplica o no se ven).
+presentaciones: lista de presentaciones identificadas. Busca menciones de: galón, 3.785, litro, 2lt, 700, 500, 250, bag, mosaico, galon. Si no hay productos visibles, lista vacía [].
+semaforo: verde=documento claro y completo, amarillo=datos parciales o dudas, rojo=ilegible o sin información útil.`
 
   const imageContent = isPdf
     ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
@@ -286,7 +334,8 @@ semaforo: verde=todo correcto, amarillo=datos parciales, rojo=ilegible o inconsi
     return {
       legible: false, tipo_documento: 'error_parse', fecha: null, monto: null,
       referencia: null, cliente_documento: null, banco_emisor: null,
-      folio_presente: null, observaciones: text.slice(0, 120), semaforo: 'rojo',
+      folio_presente: null, num_skus: null, presentaciones: [],
+      observaciones: text.slice(0, 120), semaforo: 'rojo',
     }
   }
 }
@@ -307,13 +356,14 @@ const SEM: Record<string, { bg: string; color: string; label: string }> = {
 }
 
 function exportCSV(files: EvidenciaFile[], analyses: Record<string, AnalysisResult>): void {
-  const headers = ['Folio','Archivo','URL_SharePoint','Semaforo','Tipo','Fecha','Monto','Referencia','Cliente','Banco','Folio_Presente','Observaciones','Tamaño','Modificado']
+  const headers = ['Folio','Archivo','URL_SharePoint','Semaforo','Tipo','Fecha','Monto','Referencia','Cliente','Banco','Folio_Presente','Num_SKUs','Presentaciones','Observaciones','Tamaño','Modificado']
   const rows = files.map(f => {
     const a = analyses[f.id]
     return [
       f.folio, f.name, f.webUrl ?? '', a?.semaforo ?? 'sin_analizar', a?.tipo_documento ?? '',
       a?.fecha ?? '', a?.monto ?? '', a?.referencia ?? '', a?.cliente_documento ?? '',
-      a?.banco_emisor ?? '', String(a?.folio_presente ?? ''), a?.observaciones ?? '',
+      a?.banco_emisor ?? '', String(a?.folio_presente ?? ''),
+      String(a?.num_skus ?? ''), (a?.presentaciones ?? []).join(' | '), a?.observaciones ?? '',
       fmtKB(f.size), new Date(f.modified).toLocaleDateString('es-MX'),
     ].map(v => `"${String(v).replace(/"/g, '""')}"`)
   })
@@ -350,6 +400,20 @@ function AnalysisCard({ r }: { r: AnalysisResult }) {
           <div key={k}><span style={{ color: '#94a3b8' }}>{k}: </span><strong>{v}</strong></div>
         ))}
       </div>
+      {(r.num_skus != null || (r.presentaciones && r.presentaciones.length > 0)) && (
+        <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {r.num_skus != null && (
+            <span style={{ background: '#ede9fe', color: '#4c1d95', fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 20 }}>
+              {r.num_skus} SKU{r.num_skus !== 1 ? 's' : ''}
+            </span>
+          )}
+          {r.presentaciones && r.presentaciones.map((p: string, i: number) => (
+            <span key={i} style={{ background: '#f0fdf4', color: '#064e3b', fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 20, border: '1px solid #bbf7d0' }}>
+              {p}
+            </span>
+          ))}
+        </div>
+      )}
       {r.observaciones && <p style={{ margin: '6px 0 0', color: '#64748b', fontStyle: 'italic' }}>{r.observaciones}</p>}
     </div>
   )
